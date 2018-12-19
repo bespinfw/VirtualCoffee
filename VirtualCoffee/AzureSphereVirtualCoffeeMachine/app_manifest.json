@@ -1,0 +1,17 @@
+{
+  "SchemaVersion": 1,
+  "Name": "AzureSphereVirtualCoffeeMachine",
+  "ComponentId": "1b4ff153-dd57-4f36-b998-aa40bf757f34",
+  "EntryPoint": "/bin/app",
+  "CmdArgs": [],
+  "Capabilities": {
+    "AllowedConnections": [ "smart.azure-devices.net" ],
+    "AllowedTcpServerPorts": [],
+    "AllowedUdpServerPorts": [],
+    "Gpio": [ 8, 9, 10, 15, 16, 17, 18, 19, 20, 12, 13 ],
+    "Uart": [],
+    "WifiConfig": true,
+    "NetworkConfig": false,
+    "SystemTime": false
+  }
+}
