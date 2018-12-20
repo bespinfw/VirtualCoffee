@@ -23,7 +23,7 @@
 // see information on iothub-explorer at http://aka.ms/iothubgetstartedVSCS
 //
 // or include as hiddenConnectionString in Header File called secret.h
-static const char *connectionString = hiddenConnectionString;
+static const char *connectionString = hiddenConnectionString; 
 
 /// <summary>
 ///     Maximum amount of time to attempt reconnection when the connection to the IoT Hub drops.

@@ -76,36 +76,37 @@ static int azureIotDoWorkTimerFd = -1;
 static int automatonWorkTimerFd = -1;
 static int preperationWorkTimerFd = -1;
 static int epollFd = -1;
+static clock_t clock_starttimer;
 
 // Virtual Coffee Machine Data Structure
-static enum preperation_type_type { americano, espresso };
-static enum preperation_step_type { grinding, water };
-static enum state_type { start, ready, inpreperation, nowater, nobeans, maintenance, unknown };
+typedef enum preperation_type { americano, espresso } preperation_type_t;
+typedef enum preperation_step { grinding, water } preperation_step_t;
+typedef enum state_type { start, ready, inpreperation, nowater, nobeans, maintenance, unknown } state_t;
 
-static struct virtual_coffee_machine_supply_type {
-	unsigned int coffeeBeanFillLevel;
-	unsigned int waterFillLevel;
-	unsigned int waterCalciumLevel;
-};
+typedef struct virtual_coffee_machine_supply {
+	double coffeeBeanFillLevel;
+	double waterFillLevel;
+	double waterCalciumLevel;
+} virtual_coffee_machine_supply_t;
 
-static struct preperation_reciept_type
+typedef struct preperation_reciept
 {
 	struct timespec preperationGrindingPeriod;
 	struct timespec preperationWaterPeriod;
-	unsigned int beanPerEspresso;
-	unsigned int waterPerEspresso;
-};
+	double beanPerSecond;
+	double waterPerSecond;
+} preperation_reciept_t;
 
-static struct virtual_coffee_machine_type {
-	enum state_type state;
-	enum preperation_type_type preperationType;
-	enum preperation_step_type preperationStep;
-	struct preperation_reciept_type preperationReciept;
-	struct virtual_coffee_machine_supply_type supplyLevel;
-};
+typedef struct virtual_coffee_machine {
+	state_t state;
+	preperation_type_t preperationType;
+	preperation_step_t preperationStep;
+	preperation_reciept_t preperationReciept;
+	virtual_coffee_machine_supply_t supplyLevel;
+} virtual_coffee_machine_t;
 
-// Virtual Coffee Machine Data 
-static struct virtual_coffee_machine_type vcm;
+// Virtual Coffee Machine Model 
+static virtual_coffee_machine_t vcm;
 
 // An array defining the RGB GPIOs for each LED on the device
 static const GPIO_Id ledsPins[3][3] = {
@@ -124,13 +125,21 @@ static RgbLed *rgbLeds[] = { &led1, &led2, &led3 };
 static const size_t rgbLedsCount = sizeof(rgbLeds) / sizeof(*rgbLeds);
 static bool blinkingLedState;
 static bool blinkingLedState2;
-static RgbLedUtility_Colors ledBlinkColor = RgbLedUtility_Colors_Blue;
 
 // Connectivity state
 static bool connectedToIoTHub = false;
 
 // Termination state
 static volatile sig_atomic_t terminationRequired = false;
+
+// Handler Pointers forward declaration
+static event_data_t buttonsEventDataCM;
+static event_data_t azureIotEventData;
+static event_data_t ledGrindingEventData;
+static event_data_t ledWaterEventData;
+static event_data_t automatonEventData;
+static event_data_t processingEventData;
+
 
 // ---------------------------------------------------------------
 // -- REQUIRED ONLY BY Azure Sphere IoTHub Original Demo 
@@ -165,16 +174,17 @@ static volatile sig_atomic_t terminationRequired = false;
 /// <summary>
 ///     Coffee Machine initializer
 /// </summary>
-static void InitVirtualCoffeeMachine()
+static void InitVirtualCoffeeMachine(void)
 {
-	struct virtual_coffee_machine_supply_type supply = {500, 1000, 60};
+	virtual_coffee_machine_supply_t supply = {500, 1000, 60};
 	struct timespec sec5 = { 5, 0 }; // 5sec
-	struct preperation_reciept_type preperationReceipt = { sec5, sec5, 7, 90 };
+	preperation_reciept_t preperationReceipt = { sec5, sec5, 1.4, 18.0 };
 
-	vcm.state = (enum state_type) ready;
+	// Starting in Ready State with 500g beans, 1L water, 60PPM calcium, Americano and Grinding as default (will be set on preperation request)
+	vcm.state = ready;
 	vcm.supplyLevel = supply;
-	vcm.preperationType = (enum preperation_type_type)americano;
-	vcm.preperationStep = (enum preperation_step_type)grinding;
+	vcm.preperationType = americano;
+	vcm.preperationStep = grinding;
 	vcm.preperationReciept = preperationReceipt;
 	vcm.supplyLevel = supply;
 }
@@ -401,12 +411,11 @@ static void ButtonsHandler_CM(event_data_t *eventData)
 	static GPIO_Value_Type americanoButtonState;
 	if (IsButtonPressed(gpioAmericanoButtonFd, &americanoButtonState)) {
 		
-		if (vcm.state == (enum state_type) ready)
+		if (vcm.state == ready)
 		{
 			// Make an Americano
-			vcm.state = (enum state_type) start;
-			vcm.preperationType = (enum preperation_type_type) americano;
-			
+			vcm.state = start;
+			vcm.preperationType = americano;
 			SendMessageToIotHub_CM("americano");
 		}
 		
@@ -415,12 +424,11 @@ static void ButtonsHandler_CM(event_data_t *eventData)
 	// If the button is pressed, make an espresso and send informations to IoTHub
 	static GPIO_Value_Type espressoButtonState;
 	if (IsButtonPressed(gpioEspressoButtonFd, &espressoButtonState)) {
-		if (vcm.state == (enum state_type) ready)
+		if (vcm.state ==  ready)
 		{
 			// Make an Espresso
-			vcm.state = (enum state_type) start;
-			vcm.preperationType = (enum preperation_type_type) espresso;
-			
+			vcm.state = start;
+			vcm.preperationType = espresso;
 			SendMessageToIotHub_CM("espresso");
 		}
 	}
@@ -447,6 +455,70 @@ static void AzureIotDoWorkHandler(event_data_t *eventData)
 }
 
 /// <summary>
+///     Send Virtual Coffee Machine Status Message
+/// </summary>
+static void SendVirtualCoffeeMachineStatus(void)
+{
+	static const char statusMessage[] = "{ \"coffeeBeanFillLevel_gramm\":%.2f, \"waterFillLevel_milliliter\":%.2f, \"waterCalciumLevel_ppm\":%.2f }";
+
+	size_t responseMaxLength = strlen(statusMessage)
+		+ sizeof(vcm.supplyLevel.coffeeBeanFillLevel)
+		+ sizeof(vcm.supplyLevel.waterFillLevel)
+		+ sizeof(vcm.supplyLevel.waterCalciumLevel);
+
+	char *messagePayload = SetupHeapMessage(statusMessage, responseMaxLength, 
+											vcm.supplyLevel.coffeeBeanFillLevel,
+											vcm.supplyLevel.waterFillLevel,
+											vcm.supplyLevel.waterCalciumLevel);
+
+	Log_Debug(messagePayload);
+	SendMessageToIotHub_CM(messagePayload);
+}
+
+/// <summary>
+///     Send Virtual Coffee Machine Status Complete message
+/// </summary>
+static void SendVirtualCoffeeMachinePreperationComplete(void)
+{
+	static const char statusMessage[] = "{ \"drink_prepared\":\"%s\" }";
+	static const char *drink;
+
+	if (vcm.preperationType == americano)
+	{
+		static const char temp[] = "americano";
+		drink = temp;
+	}
+	else if (vcm.preperationType == espresso)
+	{
+		static const char temp[] = "espresso";
+		drink = temp;
+	}
+	else
+	{
+		static const char temp[] = "youshouldnevergetthisdrink";
+		drink = temp;
+	}
+
+	size_t responseMaxLength = strlen(statusMessage) + strlen(drink);
+	
+	char *messagePayload = SetupHeapMessage(statusMessage, responseMaxLength, drink);
+
+	Log_Debug(messagePayload);
+	SendMessageToIotHub_CM(messagePayload);
+}
+
+/// <summary>
+///     Calculates difference in secondes between NOW and clock_starttimer value
+/// </summary>
+static double diffseconds(void)
+{
+	static clock_t t;
+	t = clock() - clock_starttimer;
+
+	return (double)t / CLOCKS_PER_SEC;
+}
+
+/// <summary>
 ///     Handle the blinking for LED1 (Grinding).
 /// </summary>
 static void GrindingUpdateHandler(event_data_t *eventData)
@@ -462,17 +534,26 @@ static void GrindingUpdateHandler(event_data_t *eventData)
 	RgbLedUtility_SetLed(&led3, color);
 
 	// Trigger LED1 to blink as appropriate.
-	if (vcm.state == (enum state_type) inpreperation && vcm.preperationStep == (enum preperation_step_type) grinding)
+	if (vcm.state == inpreperation && vcm.preperationStep == grinding)
 	{
 		blinkingLedState = !blinkingLedState;
-		color = (blinkingLedState ? ledBlinkColor : RgbLedUtility_Colors_Off);
+		color = (blinkingLedState ? RgbLedUtility_Colors_Magenta : RgbLedUtility_Colors_Off);
 		RgbLedUtility_SetLed(&led1, color);
+
+		// Calculate Bean usage
+		double seconds = diffseconds();
+		double beanusage = seconds * vcm.preperationReciept.beanPerSecond;
+		vcm.supplyLevel.coffeeBeanFillLevel -= beanusage;
+		// IoT Hub Message
+		SendVirtualCoffeeMachineStatus();
 	}
 	else 
 	{
 		RgbLedUtility_SetLed(&led1, RgbLedUtility_Colors_Off);
 	}
 }
+
+
 
 /// <summary>
 ///     Handle the blinking for LED2 (Water).
@@ -485,11 +566,18 @@ static void WaterUpdateHandler(event_data_t *eventData)
 	}
 
 	// Trigger LED to blink as appropriate.
-	if (vcm.state == (enum state_type) inpreperation)
+	if (vcm.state == inpreperation && vcm.preperationStep == water)
 	{
 		blinkingLedState2 = !blinkingLedState2;
-		RgbLedUtility_Colors color = (blinkingLedState2 ? ledBlinkColor : RgbLedUtility_Colors_Off);
+		RgbLedUtility_Colors color = (blinkingLedState2 ? RgbLedUtility_Colors_Blue : RgbLedUtility_Colors_Off);
 		RgbLedUtility_SetLed(&led2, color);
+
+		// Calculate Water usage
+		double seconds = diffseconds();
+		double waterUsage = seconds * vcm.preperationReciept.waterPerSecond;
+		vcm.supplyLevel.waterFillLevel -= waterUsage;
+		// IoT Hub Message
+		SendVirtualCoffeeMachineStatus();
 	}
 	else 
 	{
@@ -498,7 +586,7 @@ static void WaterUpdateHandler(event_data_t *eventData)
 }
 
 // Forward Declaration
-static void StartPreperation();
+static void StartPreperation(void);
 
 /// <summary>
 ///     Main Loop of Virtual Copy Machine Automaton
@@ -532,7 +620,7 @@ static void AutomatonUpdateHandler(event_data_t *eventData)
 }
 
 /// <summary>
-///     Main Loop of Virtual Copy Machine Automaton Processing Step
+///     Main Loop of Virtual Copy Machine Automaton Processing Steps
 /// </summary>
 static void ProcessingUpdateHandler(event_data_t *eventData)
 {
@@ -541,40 +629,72 @@ static void ProcessingUpdateHandler(event_data_t *eventData)
 		return;
 	}
 	
-	SendMessageToIotHub_CM("...ending preperation");
+	if (vcm.preperationStep == grinding)
+	{
+		SendMessageToIotHub_CM("...ending griding");
+		SendMessageToIotHub_CM("starting water...");
+		// State transition
+		vcm.preperationStep = water;
+		// StartTime
+		clock_starttimer = clock();
 
-	CloseFdAndPrintError(preperationWorkTimerFd, "PreperationTimer");
+		CloseFdAndPrintError(preperationWorkTimerFd, "PreperationTimer");
 
-	// TODO Check Fill Levels etc
-	vcm.state = (enum state_type) ready;
+		// Creating Wait Handle for water
+		struct timespec waterPeriod;
+		if (vcm.preperationType == americano)
+		{
+			struct timespec temp = { vcm.preperationReciept.preperationWaterPeriod.tv_sec * 2, vcm.preperationReciept.preperationWaterPeriod.tv_nsec * 2 };
+			waterPeriod = temp;
+		}
+		else
+		{
+			waterPeriod = vcm.preperationReciept.preperationWaterPeriod;
+		}
+
+		preperationWorkTimerFd =
+			CreateTimerFdAndAddToEpoll(epollFd, &waterPeriod, &processingEventData, EPOLLIN);
+		if (preperationWorkTimerFd < 0) {
+			Log_Debug("Error while creating Coffee Machine preparing Timer / Event Handler Loop");
+		}
+		
+	} 
+	else if (vcm.preperationStep == water)
+	{
+		SendMessageToIotHub_CM("...ending water");
+		
+		CloseFdAndPrintError(preperationWorkTimerFd, "PreperationTimer");
+
+		SendMessageToIotHub_CM("...ending preperation");
+		
+		SendVirtualCoffeeMachinePreperationComplete();
+
+		// TODO Check Fill Levels etc
+		vcm.state = ready;
+		vcm.preperationStep = grinding;
+	}
 }
-
-// event handler data structures. Only the event handler field needs to be populated.
-static event_data_t buttonsEventDataCM = { .eventHandler = &ButtonsHandler_CM };
-static event_data_t azureIotEventData = { .eventHandler = &AzureIotDoWorkHandler };
-static event_data_t ledGrindingEventData = { .eventHandler = &GrindingUpdateHandler };
-static event_data_t ledWaterEventData = { .eventHandler = &WaterUpdateHandler };
-static event_data_t automatonEventData = { .eventHandler = &AutomatonUpdateHandler };
-static event_data_t processingEventData = { .eventHandler = &ProcessingUpdateHandler };
 
 /// <summary>
 ///     Start Coffee Preperation - Generation of Event Handler Loop
 /// </summary>
-static void StartPreperation()
+static void StartPreperation(void)
 {
 	// Changing State
 	vcm.state = (enum state_type) inpreperation;
+	// StartTime
+	clock_starttimer = clock();
 
 	// Posting Message
 	SendMessageToIotHub_CM("staring preperation...");
+	SendMessageToIotHub_CM("staring grinding...");
 
-	// Creating Wait Handle
+	// Creating Wait Handle for gridning
 	preperationWorkTimerFd =
 		CreateTimerFdAndAddToEpoll(epollFd, &vcm.preperationReciept.preperationGrindingPeriod, &processingEventData, EPOLLIN);
 	if (preperationWorkTimerFd < 0) {
 		Log_Debug("Error while creating Coffee Machine preparing Timer / Event Handler Loop");
 	}
-	
 }
 
 /// <summary>
@@ -714,6 +834,14 @@ int main(int argc, char *argv[])
 	return 0;
 }
 
+
+// Decleration event handler data structures. Only the event handler field needs to be populated.
+static event_data_t buttonsEventDataCM = { .eventHandler = &ButtonsHandler_CM };
+static event_data_t azureIotEventData = { .eventHandler = &AzureIotDoWorkHandler };
+static event_data_t ledGrindingEventData = { .eventHandler = &GrindingUpdateHandler };
+static event_data_t ledWaterEventData = { .eventHandler = &WaterUpdateHandler };
+static event_data_t automatonEventData = { .eventHandler = &AutomatonUpdateHandler };
+static event_data_t processingEventData = { .eventHandler = &ProcessingUpdateHandler };
 
 // ---------------------------------------------------------------
 // -- REQUIRED ONLY BY Azure Sphere IoTHub Original Demo 
