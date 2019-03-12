@@ -462,6 +462,64 @@ cleanup:
 }
 
 /// <summary>
+///     Creates and enqueues a report containing the name and value pair of a Device Twin reported
+///     property.
+///     The report is not actually sent immediately, but it is sent on the next invocation of
+///     AzureIoT_DoPeriodicTasks().
+/// </summary>
+void AzureIoT_TwinReportStateStr(const char *propertyName, const char *propertyValue)
+{
+	if (iothubClientHandle == NULL) {
+		LogMessage("ERROR: client not initialized\n");
+		return;
+	}
+
+	char *reportedPropertiesString = NULL;
+	JSON_Value *reportedPropertiesRootJson = json_value_init_object();
+	if (reportedPropertiesRootJson == NULL) {
+		LogMessage("ERROR: could not create the JSON_Value for Device Twin reporting.\n");
+		return;
+	}
+
+	JSON_Object *reportedPropertiesJson = json_value_get_object(reportedPropertiesRootJson);
+	if (reportedPropertiesJson == NULL) {
+		LogMessage("ERROR: could not get the JSON_Object for Device Twin reporting.\n");
+		goto cleanup;
+	}
+
+	if (JSONSuccess !=
+		json_object_set_string(reportedPropertiesJson, propertyName, propertyValue)) {
+		LogMessage("ERROR: could not set the property value for Device Twin reporting.\n");
+		goto cleanup;
+	}
+
+	reportedPropertiesString = json_serialize_to_string(reportedPropertiesRootJson);
+	if (reportedPropertiesString == NULL) {
+		LogMessage(
+			"ERROR: could not serialize the JSON payload to string for Device "
+			"Twin reporting.\n");
+		goto cleanup;
+	}
+
+	if (IoTHubDeviceClient_LL_SendReportedState(
+		iothubClientHandle, (unsigned char *)reportedPropertiesString,
+		strlen(reportedPropertiesString), reportStatusCallback, 0) != IOTHUB_CLIENT_OK) {
+		LogMessage("ERROR: failed to set reported property '%s'.\n", propertyName);
+	}
+	else {
+		LogMessage("INFO: Set reported property '%s' to value %d.\n", propertyName, propertyValue);
+	}
+
+cleanup:
+	if (reportedPropertiesRootJson != NULL) {
+		json_value_free(reportedPropertiesRootJson);
+	}
+	if (reportedPropertiesString != NULL) {
+		json_free_serialized_string(reportedPropertiesString);
+	}
+}
+
+/// <summary>
 ///     Sets a callback function invoked whenever a message is received from IoT Hub.
 /// </summary>
 /// <param name="callback">The callback function invoked when a message is received</param>

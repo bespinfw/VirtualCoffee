@@ -42,6 +42,16 @@ void AzureIoT_DestroyClient(void);
 void AzureIoT_TwinReportState(const char *propertyName, size_t propertyValue);
 
 /// <summary>
+///     Creates and enqueues a report containing the name and value pair of a Device Twin reported
+///     property.
+///     The report is not actually sent immediately, but it is sent on the next invocation of
+///     AzureIoT_DoPeriodicTasks().
+/// </summary>
+/// <param name="propertyName">The name of the property to report.</param>
+/// <param name="propertyValue">The value of the property.</param>
+void AzureIoT_TwinReportStateStr(const char *propertyName, const char *propertyValue);
+
+/// <summary>
 ///     Creates and enqueues a message to be delivered the IoT Hub. The message is not actually sent
 ///     immediately, but it is sent on the next invocation of AzureIoT_DoPeriodicTasks().
 /// </summary>

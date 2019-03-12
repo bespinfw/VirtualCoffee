@@ -739,6 +739,9 @@ static int InitPeripheralsAndHandlersCM(void)
 	// Display the currently connected WiFi connection.
 	DebugPrintCurrentlyConnectedWiFiNetwork();
 
+	// Set device type
+	AzureIoT_TwinReportStateStr("deviceType", "virtualCoffeeMachine");
+
 	epollFd = CreateEpollFd();
 	if (epollFd < 0) {
 		return -1;
